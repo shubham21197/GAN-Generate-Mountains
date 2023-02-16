@@ -1,8 +1,23 @@
 import tensorflow as tf
 from tensorflow.keras import layers
-from IPython.display import clear_output
 import matplotlib.pyplot as plt
 import glob
+import keras.backend as K
+
+tf.config.threading.set_inter_op_parallelism_threads(4)
+
+def minibatch_std_layer(layer, group_size=4):
+
+    group_size = K.minimum(4, layer.shape[0])
+    shape = layer.shape
+
+    minibatch = K.reshape(layer,(group_size, -1, shape[1], shape[2]))
+    minibatch -= tf.reduce_mean(minibatch, axis=0, keepdims=True)
+    minibatch = tf.reduce_mean(K.square(minibatch), axis = 0)
+    minibatch = K.square(minibatch + 1e-8) #epsilon=1e-8
+    minibatch = tf.reduce_mean(minibatch, axis=[1,2], keepdims=True)
+    minibatch = K.tile(minibatch,[group_size, 1, shape[2]])
+    return K.concatenate([layer, minibatch], axis=1)
 
 # The discriminator model takes an image as input and returns a probability
 # indicating whether the image is real or fake
@@ -11,11 +26,17 @@ def make_discriminator_model():
     model.add(layers.Conv2D(64, (5, 5), strides=(2, 2), padding='same',
                                      input_shape=[256, 256, 3]))
     model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
+    model.add(layers.Dropout(0.25))
   
     model.add(layers.Conv2D(128, (5, 5), strides=(2, 2), padding='same'))
     model.add(layers.LeakyReLU())
-    model.add(layers.Dropout(0.3))
+    model.add(layers.Dropout(0.25))
+
+    model.add(layers.Conv2D(256, (5, 5), strides=(2, 2), padding='same'))
+    model.add(layers.LeakyReLU())
+    model.add(layers.Dropout(0.25))
+
+    model.add(layers.Lambda(minibatch_std_layer))
   
     model.add(layers.Flatten())
     model.add(layers.Dense(1, activation='sigmoid'))
@@ -25,40 +46,39 @@ def make_discriminator_model():
 # The generator model takes a noise vector as input and returns an image
 def make_generator_model():
     model = tf.keras.Sequential()
-    model.add(layers.Dense(8 * 8 * 512, use_bias=False, input_shape=(100,)))
+    model.add(layers.Dense(8 * 8 * 256, use_bias=False, input_shape=(100,)))
     model.add(layers.BatchNormalization())
     model.add(layers.LeakyReLU())
 
-    model.add(layers.Reshape((8, 8, 512)))
-    assert model.output_shape == (None, 8, 8, 512) # Note: None is the batch size
+    model.add(layers.Reshape((8, 8, 256)))
+    assert model.output_shape == (None, 8, 8, 256) # Note: None is the batch size
 
-    model.add(layers.Conv2DTranspose(256, (5, 5), strides=(2, 2), padding='same', use_bias=False))
-    # model.add(layers.Lambda(lambda x: tf.pad(x, [[0, 0], [2, 2], [2, 2], [0, 0]], mode='reflect')))
+    model.add(layers.UpSampling2D())
+    model.add(layers.Conv2D(256, kernel_size = 3, padding = "same"))
     assert model.output_shape == (None, 16, 16, 256)
-    model.add(layers.BatchNormalization())
+    model.add(layers.BatchNormalization(momentum=0.8))
     model.add(layers.LeakyReLU())
 
-    model.add(layers.Conv2DTranspose(128, (5, 5), strides=(2, 2), padding='same', use_bias=False))
-    # model.add(layers.Lambda(lambda x: tf.pad(x, [[0, 0], [2, 2], [2, 2], [0, 0]], mode='reflect')))
-    assert model.output_shape == (None, 32, 32, 128)
-    model.add(layers.BatchNormalization())
+    model.add(layers.UpSampling2D())
+    model.add(layers.Conv2D(256, kernel_size = 3, padding = "same"))
+    assert model.output_shape == (None, 32, 32, 256)
+    model.add(layers.BatchNormalization(momentum=0.8))
+    model.add(layers.LeakyReLU())
+    
+    model.add(layers.UpSampling2D())
+    model.add(layers.Conv2D(128, kernel_size = 3, padding = "same"))
+    assert model.output_shape == (None, 64, 64, 128)
+    model.add(layers.BatchNormalization(momentum=0.8))
     model.add(layers.LeakyReLU())
 
-    model.add(layers.Conv2DTranspose(64, (5, 5), strides=(2, 2), padding='same', use_bias=False))
-    # model.add(layers.Lambda(lambda x: tf.pad(x, [[0, 0], [2, 2], [2, 2], [0, 0]], mode='reflect')))
-    assert model.output_shape == (None, 64, 64, 64)
-    model.add(layers.BatchNormalization())
+    model.add(layers.UpSampling2D(size = (4, 4)))
+    model.add(layers.Conv2D(128, kernel_size = 3, padding = "same"))
+    assert model.output_shape == (None, 256, 256, 128)
+    model.add(layers.BatchNormalization(momentum=0.8))
     model.add(layers.LeakyReLU())
-    
-    model.add(layers.Conv2DTranspose(32, (5, 5), strides=(2, 2), padding='same', use_bias=False))
-    # model.add(layers.Lambda(lambda x: tf.pad(x, [[0, 0], [2, 2], [2, 2], [0, 0]], mode='reflect')))
-    assert model.output_shape == (None, 128, 128, 32)
-    model.add(layers.BatchNormalization())
-    model.add(layers.LeakyReLU())
-    
-    model.add(layers.Conv2DTranspose(3, (5, 5), strides=(2, 2), padding='same', use_bias=False, activation='tanh'))
-    # model.add(layers.Lambda(lambda x: tf.pad(x, [[0, 0], [2, 2], [2, 2], [0, 0]], mode='reflect')))
-    assert model.output_shape == (None, 256, 256, 3)
+
+    model.add(layers.Conv2D(3, kernel_size = 3, padding = "same"))
+    model.add(layers.Activation("tanh"))
 
     return model
 
@@ -92,7 +112,7 @@ discriminator_optimizer = tf.keras.optimizers.Adam(1e-4)
 EPOCHS = 50
 noise_dim = 100
 num_examples_to_generate = 16
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 
 # We will reuse this seed overtime (so it's easier)
 # to visualize progress in the animated GIF)
@@ -146,7 +166,7 @@ def generate_and_save_images(model, epoch, test_input):
     # don't want to train the batchnorm layer when doing inference.
     predictions = model(test_input, training=False)
 
-    fig = plt.figure(figsize=(16,16))
+    fig = plt.figure(figsize=(4, 4))
     
     for i in range(predictions.shape[0]):
         plt.subplot(4, 4, i+1)
@@ -160,7 +180,7 @@ def load_image(image_file):
     image = tf.io.read_file(image_file)
     image = tf.image.decode_jpeg(image)
     image = tf.image.resize(image, [256, 256])
-    image = (image- 127.5) / 127.5
+    image = (image - 127.5) / 127.5
     return image
 
 def load_dataset(folder_path):
